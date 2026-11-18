@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GitHub Comic Uploader</title>
+    <title>Fast GitHub Comic Uploader</title>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -29,39 +29,51 @@
         button:disabled { background-color: #555; cursor: not-allowed; }
         #log {
             margin-top: 20px; background: #0d1117; padding: 15px;
-            height: 300px; overflow-y: auto; font-family: monospace;
+            height: 350px; overflow-y: auto; font-family: monospace;
             border: 1px solid #30363d; border-radius: 4px; font-size: 13px;
         }
         .success { color: #3fb950; }
         .error { color: #f85149; }
         .info { color: #58a6ff; }
+        .warning { color: #d29922; }
     </style>
 </head>
 <body>
 
-    <h2>Comic Uploader for GitHub</h2>
+    <h2>Fast Comic Uploader for GitHub</h2>
 
     <div class="input-group">
-        <label for="pat">GitHub Personal Access Token (PAT)</label>
+        <label for="pat">GitHub Personal Access Token (PAT) <span style="font-size:12px; font-weight:normal; color:#8b949e;">(Auto-saved)</span></label>
         <input type="password" id="pat" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx">
     </div>
 
     <div class="input-group">
         <label for="folderInput">Select Main Folder</label>
-        <!-- webkitdirectory property allows selecting folders with subfolders -->
         <input type="file" id="folderInput" webkitdirectory directory multiple>
     </div>
 
-    <button id="uploadBtn">Start Upload</button>
+    <button id="uploadBtn">Start Fast Upload</button>
 
-    <div id="log">Logs will appear here...<br><br></div>
+    <div id="log">Ready to upload...<br><br></div>
 
     <script>
         const repoOwner = "maxton480";
         const repoName = "comics";
+        const BATCH_SIZE = 5; // Ek sath 5 images upload hogi (speed ke liye)
         
         const logDiv = document.getElementById('log');
         const uploadBtn = document.getElementById('uploadBtn');
+        const patInput = document.getElementById('pat');
+
+        // PAT Key Save & Load logic
+        window.addEventListener('DOMContentLoaded', () => {
+            const savedPat = localStorage.getItem('github_pat_comics');
+            if (savedPat) patInput.value = savedPat;
+        });
+
+        patInput.addEventListener('input', (e) => {
+            localStorage.setItem('github_pat_comics', e.target.value.trim());
+        });
 
         function addLog(msg, type = "info") {
             const span = document.createElement('div');
@@ -75,73 +87,76 @@
             return new Promise((resolve, reject) => {
                 const reader = new FileReader();
                 reader.readAsDataURL(file);
-                reader.onload = () => resolve(reader.result.split(',')[1]); // Only keep base64 string
+                reader.onload = () => resolve(reader.result.split(',')[1]);
                 reader.onerror = error => reject(error);
             });
         }
 
+        async function uploadSingleFile(file, pat) {
+            const filePath = file.webkitRelativePath;
+            try {
+                const contentBase64 = await toBase64(file);
+                
+                const response = await fetch(`https://api.github.com/repos/${repoOwner}/${repoName}/contents/${filePath}`, {
+                    method: 'PUT',
+                    headers: {
+                        'Authorization': `Bearer ${pat}`,
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/vnd.github.v3+json'
+                    },
+                    body: JSON.stringify({
+                        message: `Upload ${filePath}`,
+                        content: contentBase64
+                    })
+                });
+
+                if (response.status === 201 || response.status === 200) {
+                    addLog(`[Success] ${filePath}`, "success");
+                } else if (response.status === 422) {
+                    addLog(`[Skipped] ${filePath} (Already exists)`, "warning");
+                } else {
+                    const err = await response.json();
+                    addLog(`[Failed] ${filePath} - ${err.message}`, "error");
+                }
+            } catch (error) {
+                addLog(`[Error] ${filePath}: ${error.message}`, "error");
+            }
+        }
+
         uploadBtn.addEventListener('click', async () => {
-            const pat = document.getElementById('pat').value.trim();
-            const files = document.getElementById('folderInput').files;
+            const pat = patInput.value.trim();
+            const rawFiles = document.getElementById('folderInput').files;
 
             if (!pat) {
                 addLog("Error: Please enter your GitHub Token.", "error");
                 return;
             }
-            if (files.length === 0) {
+            if (rawFiles.length === 0) {
                 addLog("Error: Please select a folder first.", "error");
                 return;
             }
 
+            // Hidden/system files ko filter karna (like .DS_Store)
+            const files = Array.from(rawFiles).filter(f => !f.name.startsWith('.'));
+
             uploadBtn.disabled = true;
-            uploadBtn.textContent = "Uploading... Do not close window";
-            addLog(`Found ${files.length} files. Starting upload process...`);
+            uploadBtn.textContent = `Uploading ${files.length} files...`;
+            addLog(`Found ${files.length} valid files. Starting batch upload (${BATCH_SIZE} at a time)...`);
 
-            for (let i = 0; i < files.length; i++) {
-                const file = files[i];
-                // webkitRelativePath contains the structure (e.g., "MainFolderName/ch1/img.jpg")
-                const filePath = file.webkitRelativePath; 
+            // Batch Processing loop
+            for (let i = 0; i < files.length; i += BATCH_SIZE) {
+                const batch = files.slice(i, i + BATCH_SIZE);
+                addLog(`Processing batch ${Math.floor(i/BATCH_SIZE) + 1}...`, "info");
                 
-                if (!filePath || file.name.startsWith('.')) continue; // Ignore hidden system files
-
-                addLog(`[${i+1}/${files.length}] Converting ${filePath}...`, "info");
-                
-                try {
-                    const contentBase64 = await toBase64(file);
-                    
-                    const response = await fetch(`https://api.github.com/repos/${repoOwner}/${repoName}/contents/${filePath}`, {
-                        method: 'PUT',
-                        headers: {
-                            'Authorization': `Bearer ${pat}`,
-                            'Content-Type': 'application/json',
-                            'Accept': 'application/vnd.github.v3+json'
-                        },
-                        body: JSON.stringify({
-                            message: `Add ${filePath} via Web Tool`,
-                            content: contentBase64
-                        })
-                    });
-
-                    if (response.status === 201 || response.status === 200) {
-                        addLog(`Success: Uploaded ${filePath}`, "success");
-                    } else if (response.status === 422) {
-                        addLog(`Skipped: ${filePath} (File already exists or invalid data)`, "info");
-                    } else {
-                        const err = await response.json();
-                        addLog(`Failed: ${filePath} - ${err.message}`, "error");
-                    }
-                    
-                    // Delay of 500ms between uploads so GitHub API rate limit hit na ho
-                    await new Promise(r => setTimeout(r, 500)); 
-
-                } catch (error) {
-                    addLog(`Error uploading ${filePath}: ${error.message}`, "error");
-                }
+                // Batch mein sabhi files ko ek sath upload pe lagana
+                const uploadPromises = batch.map(file => uploadSingleFile(file, pat));
+                await Promise.all(uploadPromises);
             }
 
-            addLog("Upload complete!", "success");
+            addLog("All Uploads Completed!", "success");
             uploadBtn.disabled = false;
-            uploadBtn.textContent = "Start Upload";
+            uploadBtn.textContent = "Start Fast Upload";
+            document.getElementById('folderInput').value = ""; // Reset file input
         });
     </script>
 </body>
