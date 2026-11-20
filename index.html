@@ -187,7 +187,8 @@ async function gh(pat, path, opts = {}, tries = 4){
       const wait = (parseInt(res.headers.get('retry-after')) || 2*(t+1)) * 1000;
       await sleep(wait); continue;
     }
-    let msg = res.statusText; try{ msg = (await res.json()).message }catch(e){}
+    let msg = res.statusText;
+    try{ const j = await res.json(); msg = j.message + (j.errors ? ' ' + JSON.stringify(j.errors) : ''); }catch(e){}
     const err = new Error(`${res.status}: ${msg}`); err.status = res.status; throw err;
   }
 }
@@ -222,6 +223,7 @@ $('uploadBtn').onclick = async () => {
   $('fill').style.width = '0%';
 
   const base = `/repos/${owner}/${repo}`;
+  let step = '';
   try{
     // 1. Find branch + latest commit + existing files
     let branch = $('branch').value.trim();
@@ -255,7 +257,8 @@ $('uploadBtn').onclick = async () => {
       while (idx < files.length){
         const file = files[idx++];
         const rel = file.webkitRelativePath || file.name;
-        const path = prefix ? `${prefix}/${rel}` : rel;
+        const path = (prefix ? `${prefix}/${rel}` : rel)
+          .replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/^(\.\/|\/)+/, '');
         try{
           const buf = await file.arrayBuffer();
           const sha = await gitSha(buf);
@@ -279,17 +282,29 @@ $('uploadBtn').onclick = async () => {
 
     // 3. One commit for everything
     if (entries.length){
+      // Remove duplicate paths, then build the tree in small chunks (avoids timeouts)
+      const unique = [...new Map(entries.map(n => [n.path, n])).values()];
+      let treeSha = parent.tree.sha;
+      const CHUNK = 100;
+      for (let i = 0; i < unique.length; i += CHUNK){
+        step = `tree ${Math.min(i + CHUNK, unique.length)}/${unique.length}`;
+        log(`Building ${step}…`);
+        const t = await gh(pat, `${base}/git/trees`, {
+          method: 'POST', body: JSON.stringify({ base_tree: treeSha, tree: unique.slice(i, i + CHUNK) })
+        });
+        treeSha = t.sha;
+      }
+      step = 'commit';
       log('Creating commit…');
-      const tree = await gh(pat, `${base}/git/trees`, {
-        method: 'POST', body: JSON.stringify({ base_tree: parent.tree.sha, tree: entries })
-      });
       const commit = await gh(pat, `${base}/git/commits`, {
         method: 'POST',
-        body: JSON.stringify({ message: `Add ${entries.length} comic files via Comic Uploader`, tree: tree.sha, parents: [parentSha] })
+        body: JSON.stringify({ message: `Add ${unique.length} comic files via Comic Uploader`, tree: treeSha, parents: [parentSha] })
       });
+      step = 'branch update';
       await gh(pat, `${base}/git/refs/heads/${encodeURIComponent(branch)}`, {
         method: 'PATCH', body: JSON.stringify({ sha: commit.sha })
       });
+      step = '';
     }
     const secs = ((performance.now()-t0)/1000).toFixed(1);
     log(`Done in ${secs}s — ${uploaded} uploaded, ${skipped} skipped, ${failed} failed.`, failed ? 'error' : 'success');
@@ -298,7 +313,8 @@ $('uploadBtn').onclick = async () => {
     if (e.status === 401) hint = ' Token is invalid or expired.';
     else if (e.status === 403 || e.status === 404) hint = ' Check that the token has Contents read/write access to this repo, and the names are correct.';
     else if (e.status === 409) hint = ' The repo may be empty. Add a README on GitHub first, then retry.';
-    log(`Error: ${e.message}.${hint}`, 'error');
+    if (e.status === 422) hint = ' GitHub rejected the data. Check file/folder names for odd characters.';
+    log(`Error${step ? ' at ' + step : ''}: ${e.message}.${hint}`, 'error');
   }
   $('uploadBtn').disabled = false; $('uploadBtn').textContent = 'Start upload';
 };
